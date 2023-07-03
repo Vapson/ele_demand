@@ -1,0 +1,268 @@
+# -*- coding: utf-8 -*-
+
+#
+# Spatial matching of dynamic explanatory variables with actual demand data
+# explanatory variables: population, GDP per Capita, nightlight (nlt), CO2 emission, temperature
+#
+
+import os
+import geopandas as gpd
+import math
+import xarray as xr
+import rioxarray
+import numpy as np
+import pandas as pd
+import warnings
+warnings.filterwarnings('ignore')
+
+import datetime
+
+dirs = r'F:\Data\Demand' # Please change the data folder at your own computer
+os.chdir(dirs)
+
+#
+# define the period and co2 sector
+#
+years=np.arange(2000,2020,1)
+co2_sector_name = ['ENE','CHE','IRO','NFE','NMM','RCO']
+
+#
+# add the file path
+#
+scale = ['national','regional','city']
+path = []
+for s in range(len(scale)):
+    folder = os.listdir('./'+scale[s])
+    for i in range(len(folder)):
+        path.append(os.path.join('./',scale[s],folder[i]))
+
+#
+# initialization
+#
+pop_gdp_nlt = np.full((len(years),len(path),3), 0, dtype=np.float32)
+co2_sector = np.full((len(years),len(co2_sector_name),len(path)), 0, dtype = np.float32)
+temp_df = np.full((len(years),len(path),8784), 0, dtype=np.float32)
+
+for y in range(0,len(years)):
+    year = years[y]
+  
+    if year%4==0:
+        days=366
+    else:
+        days=365
+  
+    #
+    # read nightlight data
+    #
+    if year >= 2014:
+        nlt_data =  xr.open_dataset(r'F:\Data\harmonized global NTL dataset\Harmonized_DN_NTL_'+str(year)+'_simVIIRS.tif') # Please change the data folder at your own computer
+        
+    else:
+        nlt_data =  xr.open_dataset(r'F:\Data\harmonized global NTL dataset\Harmonized_DN_NTL_'+str(year)+'_calDMSP.tif') # Please change the data folder at your own computer
+    
+    #
+    # read population data
+    #
+    pop = xr.open_rasterio(r'F:\Data\Landscan_pop\landscan-global-'+str(year)+'.tif')
+    pop.values[pop.values == pop.nodatavals] = 0     
+    pop.rio.write_crs("EPSG:4326", inplace=True)
+    pop.rio.set_spatial_dims(x_dim = 'x', y_dim = 'y', inplace = True) 
+    
+    #
+    # corsen methods to match pop data
+    #
+    # lon_axis      
+    nsamples = pop.shape[2] + 1
+    bins_x = np.linspace(pop.x.min(),pop.x.max(), nsamples)
+    
+    # lat_axis
+    nsamples = pop.shape[1] + 1
+    bins_y = np.linspace(pop.y.min(),pop.y.max(), nsamples)
+    
+    nlt_data = nlt_data['band_data'].groupby_bins('x', bins_x).mean().groupby_bins('y', bins_y).mean() 
+    nlt_data.values[np.isnan(nlt_data.values)] = 0 
+    nlt_data  = nlt_data.sortby(nlt_data.y_bins,ascending= False)
+    nlt_data = xr.DataArray(nlt_data[0,:].values,
+                            dims=['y','x'],coords={'y': pop.y.values,'x': pop.x.values})
+
+    # prepare for add weight(pop)
+    nlt_data = nlt_data * pop[0,:] 
+    nlt_data.rio.write_crs("EPSG:4326", inplace=True)
+    nlt_data.rio.set_spatial_dims(x_dim='x', y_dim='y', inplace=True)   
+
+    #
+    # read GDP per Capita data
+    #
+    gdp=xr.open_rasterio(r'F:\Data\GDP_PPP\GDP_per_capita_PPP_'+str(year)+'.tif')
+    gdp.rio.write_crs("EPSG:4326", inplace=True)
+    gdp.rio.set_spatial_dims(x_dim='x', y_dim='y', inplace=True)     
+
+    #
+    # corsen if GDP per Capita are used
+    #    
+    # lon_axis      
+    nsamples = gdp.shape[2] + 1
+    bins_x = np.linspace(gdp.x.min(),gdp.x.max(), nsamples)#.astype(int)    
+    
+    # lat_axis
+    nsamples = gdp.shape[1] + 1
+    bins_y = np.linspace(gdp.y.min(),gdp.y.max(), nsamples)#.astype(int)    
+  
+    pop_forgdp = pop.groupby_bins('x', bins_x).sum().groupby_bins('y', bins_y).sum() 
+    pop_forgdp  = pop_forgdp.sortby(pop_forgdp.y_bins,ascending= False) 
+    pop_forgdp = xr.DataArray(pop_forgdp[0,:].values,dims=['y','x'],coords={'y': gdp.y.values,'x': gdp.x.values})
+    pop_forgdp.rio.write_crs("EPSG:4326", inplace=True)
+    pop_forgdp.rio.set_spatial_dims(x_dim='x', y_dim='y', inplace=True) 
+    
+    gdp = gdp[0,:] * pop_forgdp / 1000000 # --> million USD
+    
+    #
+    # read temperature data
+    #
+    temp_data = xr.open_dataset('H:\\ERA5\\'+str(year)+'_temp.nc') # Please change the data folder at your own computer
+    temp_data.coords['longitude'] = (temp_data.coords['longitude'] + 180) % 360 - 180
+    temp_data  = temp_data.sortby(temp_data.longitude)  
+    
+
+    print('strat:', year, 'clip')
+    for i in range(0,len(path)):       
+        boundary=gpd.read_file( path[i] )
+        if len(boundary)>1:
+            boundary=boundary.dissolve() 
+            
+        # temperature select
+        geo = boundary.geometry[0]
+        lon_min,lat_min,lon_max,lat_max=geo.bounds
+        
+        out_pop = pop[0,:].sel(x=slice(lon_min,lon_max),y=slice( lat_max,lat_min)) 
+        out_pop_forgdp = pop_forgdp.sel(x=slice(lon_min,lon_max),y=slice( lat_max,lat_min)) 
+        out_gdp = gdp.sel(x=slice(lon_min,lon_max),y=slice( lat_max,lat_min)) 
+        nlt = nlt_data.sel(x=slice(lon_min,lon_max),y=slice( lat_max,lat_min)) 
+  
+       
+        out_pop = out_pop.rio.clip( boundary.geometry,boundary.crs,drop=False)
+        pop_gdp_nlt[y,i,1] = np.sum(out_pop.values[out_pop.values!=out_pop._FillValue])
+        
+        out_gdp = out_gdp.rio.clip( boundary.geometry,boundary.crs,drop=False)   
+        out_pop_forgdp = out_pop_forgdp.rio.clip( boundary.geometry,boundary.crs,drop=False)   
+        pop_gdp_nlt[y,i,0] = np.nansum(out_gdp)/np.nansum(out_pop_forgdp) * 1000000 # ppp per Capita
+
+
+        nlt = nlt.rio.clip( boundary.geometry,boundary.crs,drop=False)
+        nlt.values[np.isnan(nlt.values)]=0 
+        pop_gdp_nlt[y,i,2] = np.sum(nlt.values) / np.sum(out_pop.values)
+  
+        #
+        # read CO2 emission data by sector
+        #     
+        for s in range(len(sector)):
+            co2 = xr.open_dataset('H:\\EDGAR\\'+'v7.0_FT2021_CO2_excl_short-cycle_org_C_' + str(year) + '_' + co2_sector_name[s] + '.0.1x0.1.nc')
+            co2.coords['lon'] = (co2.coords['lon'] + 180) % 360 - 180
+            co2  = co2.sortby(co2.lon)  
+            co2  = co2.sortby(co2.lat, ascending= False)    
+            co2.rio.write_crs("EPSG:4326", inplace=True)
+            co2 = co2.rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True) 
+            out_co2 = co2.rio.clip( boundary.geometry, boundary.crs, drop=False)
+            co2_sector[y,s,i]=np.nansum(out_co2['emi_co2'] * 24 * 60 * 60 * days) # --> kg/year/m2
+
+        lon_min,lat_min,lon_max,lat_max=geo.bounds
+        
+        # deal with the case the range is too small and no grid is selected
+        test = temp_data['t2m'].sel(longitude=slice(lon_min,lon_max), latitude=slice(lat_max,lat_min)) 
+        if test.shape[1] == 0:
+            run_off = 0.25 * math.ceil(lat_max / 0.25) 
+            lat_max = run_off
+  
+        if test.shape[2] == 0:
+            run_off = 0.25 * math.floor(lon_min / 0.25)
+            lon_min = run_off  
+  
+        temp = temp_data['t2m'].sel(longitude=slice(lon_min,lon_max),latitude=slice( lat_max,lat_min)) 
+            
+        # set pop as weight
+        weight_pop=out_pop.copy()
+            
+        # lon_axis
+        nsamples = temp.shape[2] + 1
+        bins_x = np.linspace(weight_pop.x.min(),
+                           weight_pop.x.max(), nsamples)#.astype(int)
+        # lat_axis
+        nsamples = temp.shape[1] + 1
+        bins_y = np.linspace(weight_pop.y.min(),
+                           weight_pop.y.max(), nsamples)#.astype(int)
+        
+        # coarsen
+        weight = weight_pop.groupby_bins('x', bins_x).sum().groupby_bins('y', bins_y).sum()
+        weight  = weight.sortby(weight.y_bins,ascending= False)
+        weight = weight.data
+  
+        # zonal weighted average hourly temperature
+        weighted_ave_temp=[np.average(temp[cum_hour,:].values, weights=weight) for cum_hour in range(temp.shape[0])]
+        temp_df[y,i,:temp.shape[0]] = np.array(weighted_ave_temp) - 273.15
+        
+        print(year,path[i],datetime.datetime.now())
+        del out_pop, out_gdp, nlt, temp, weight_pop, weight
+   
+
+#
+# save
+#          
+for i in range(0,len(path)):     
+    writer = pd.ExcelWriter(os.path.join(path[i],'dynamic_variables.xlsx'))
+    da1 = pd.DataFrame(pop_gdp_nlt[:,i,:], columns=['GDP','POP','NLT'])
+    da1.index = np.arange(2000,2020,1)
+    da1.to_excel(writer,sheet_name='pop_landscan_and_GDP_Kummu')
+    da2 = pd.DataFrame(temp_df[:,i,:])
+    da2.index = np.arange(2000,2020,1)
+    da2.to_excel(writer,sheet_name='temperature_landscan')    
+    da3 = pd.DataFrame(co2_sector[:,:,i], columns = co2_sector_name)
+    da3.index = np.arange(2000,2020,1)
+    da3.to_excel(writer,sheet_name='co2_sector')        
+    writer.close()
+    
+
+#    
+# Modify the city GDP algorithm: GDP is extracted using city central points
+#
+dirs = r'F:\Data\Demand\city'
+path=[]
+folder=os.listdir(dirs)
+for i in range(len(folder)):
+    path.append(os.path.join(r'F:\Data\Demand\city',folder[i]))
+     
+    
+years=np.arange(2000,2020,1)
+
+#
+# initialization
+#
+gdps=np.full((len(years),len(path)),0,dtype=np.float32)
+for y in range(0,len(years)):
+    year = years[y]        
+    gdp = xr.open_rasterio(r'F:\Data\GDP_PPP\GDP_per_capita_PPP_'+str(year)+'.tif')
+    gdp.rio.write_crs("EPSG:4326", inplace=True)
+    gdp.rio.set_spatial_dims(x_dim='x', y_dim='y', inplace=True)     
+
+    print('strat:', year, 'clip')
+    for i in range(0,len(path)):   
+        if i==4:
+            gdps[y,i] = gdp[0,675,2586]
+        elif i==34:
+            gdps[y,i] = gdp[0,1010,2159]
+        else:
+            boundary = gpd.read_file( path[i] )
+            if len(boundary)>1:
+                boundary = boundary.dissolve()
+                
+            # temperature select
+            out_gdp = gdp.rio.clip( boundary.geometry,boundary.crs,drop=False)      
+            g = out_gdp.values[~np.isnan(out_gdp.values)]
+            g = g[g != -9]
+            elements = np.unique(g)
+            count = [len(g[g == z]) for z in elements]
+            gdps[y,i] = elements[np.argmax(count)]
+
+d = pd.DataFrame(gdps.T)
+d.columns = years
+d.index = folder
+d.to_csv(r'F:\Data\Demand\city_gdp_perCapita.csv')
