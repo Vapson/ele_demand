@@ -1,0 +1,147 @@
+# -*- coding: utf-8 -*-
+
+
+#
+# Organize training data
+#
+
+import os
+import numpy as np
+import pandas as pd
+
+
+global dirs, scale
+dirs = r'F:\Data\Demand'
+scale = ['national','regional','city']
+
+
+def dynamic_variables_path():
+    # get demand_files and variables files path for each country / region / city 
+    # Please change the coding work folder at your own computer
+    demand_files = []
+    dynamic_variables_files = []
+    for i in range(len(scale)):
+        file_path = os.path.join(dirs,scale[i])
+        loc = os.listdir(file_path)
+        for j in range(len(loc)):
+            #filter .xlsx file
+            files = os.listdir (os.path.join(dirs,scale[i],loc[j]))
+            demand_file = []
+            dynamic_variables_file = []
+            for z in range(len(files)):
+                formats = os.path.splitext( os.path.join(dirs,scale[i],loc[j],files[z]) )[-1]
+                if formats == '.xlsx' and files[z] != 'dynamic_variables.xlsx':
+                    demand_file.append( os.path.join(dirs,scale[i],loc[j],files[z]) )
+                elif files[z] == 'dynamic_variables.xlsx':
+                    dynamic_variables_file.append( os.path.join(dirs,scale[i],loc[j],files[z]) )
+                    
+            demand_files.append(demand_file)
+            dynamic_variables_files.append(dynamic_variables_file)
+    return demand_files, dynamic_variables_files    
+
+
+#
+# read data
+#
+def main():
+    demand_files, dynamic_variables_files = dynamic_variables_path()
+    
+    for i in range(0,len(demand_files)):       
+        #
+        # read actual demand data
+        #        
+        for d in range(len(demand_files[i])):
+            demand_data = pd.read_excel(demand_files[i][d],index_col=0)
+            if d==0:
+                demand = demand_data
+            else:
+                demand = pd.concat((demand,demand_data))
+        demand = demand.reset_index(drop=True)
+        p = os.path.split(demand_files[i][d])
+        name = os.path.split(p[0])[1]
+        demand['name'] = name
+        
+        if np.unique(demand['year']).min()>2019:
+            continue
+        
+        #
+        # read temperature data
+        #
+        x = pd.read_excel(os.path.join(p[0],'dynamic_variables.xlsx'),sheet_name='temperature_landscan')
+        x.rename(columns={'Unnamed: 0': 'year'}, inplace=True)
+        if 'temp' in vars():
+            del temp
+        for y in np.unique(demand['year']):
+            if y>2019 or y<2000:
+                continue
+            t = x.loc[y-2000].drop('year')
+            t = pd.DataFrame(t[t != 0])
+            t.columns = ['temp']
+            t['year'] = y
+            t['cum_hour'] = t.index
+            if 'temp' not in vars():
+                temp = t
+            else:
+                temp = pd.concat((temp,t))
+                
+        #
+        # read GDP and population data
+        #
+        x = pd.read_excel(os.path.join(p[0],'dynamic_variables.xlsx'), sheet_name='pop_landscan_and_GDP_Kummu')   
+        x.rename(columns={'Unnamed: 0': 'year'}, inplace=True)
+        if 'gdp_pop_nlt' in vars():
+            del gdp_pop_nlt
+        for y in np.unique(demand['year']):
+            if y>2019 or y<2000:
+                continue
+            t = x.loc[y-2000].drop('year')   
+            
+            if y%4 == 0:
+                hours=8784
+            else:
+                hours=8760
+                
+            ppp = [t['POP'] for hour in range(hours)]
+            gdp = [t['GDP'] for hour in range(hours)] # unit:10**6 USD / PPP
+            nlt = [t['NLT'] for hour in range(hours)]
+            
+            gp = pd.DataFrame(np.array([ppp,gdp,nlt]).T)
+            gp.columns=['pop','gdp','nlt']
+            gp['year']=y
+            gp['cum_hour']=gp.index
+            if 'gdp_pop_nlt' not in vars():
+                gdp_pop_nlt = gp
+            else:
+                gdp_pop_nlt = pd.concat((gdp_pop_nlt,gp))  
+                
+        #
+        # read CO2 emission data
+        #   
+        x = pd.read_excel(os.path.join(p[0],'dynamic_variables.xlsx'), sheet_name='co2_sector')   
+        x.rename(columns = {'Unnamed: 0': 'year'}, inplace=True)
+        if 'co2_sector' in vars():
+            del co2_sector
+        for y in np.unique(demand['year']):
+            if y>2019 or y<2000:
+                continue
+            t = x.loc[y-2000].drop('year')   
+       
+            c = pd.DataFrame(np.array([t]))
+            c.columns = t.index
+            c['year'] = y
+
+            if 'co2_sector' not in vars():
+                co2_sector = c 
+            else:
+                co2_sector = pd.concat((co2_sector,c))                    
+        
+        m = pd.merge(demand, temp, on = ['year','cum_hour'])
+        m = pd.merge(m, gdp_pop_nlt, on = ['year','cum_hour'])
+        m = pd.merge(m, co2_sector, on = ['year'])
+        m.to_excel( os.path.join(r'F:\Data\Demand\train\tables',name+'.xlsx') ) # Please change the coding work folder at your own computer
+        print(i)
+        del m
+
+
+main()
+
