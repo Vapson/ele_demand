@@ -1,0 +1,181 @@
+# -*- coding: utf-8 -*-
+
+import os 
+import numpy as np
+import pandas as pd
+import datetime
+
+
+
+def loction():
+    #
+    # get centroid for each country / region / city
+    #
+    import geopandas as gpd
+    lon = []
+    lat = []
+    name = []
+    for scale in ['national','regional','city']:
+        folder = os.listdir(os.path.join(r'F:\Data\Demand', scale))
+        for i in range(0,len(folder)):       
+            path = os.path.join(os.path.join(r'F:\Data\Demand', scale, folder[i]))
+            boundary = gpd.read_file( path )
+            if len(boundary)>1:
+                boundary = boundary.dissolve() 
+            x = boundary.centroid[0]
+            lon.append(x.coords[0][0])
+            lat.append(x.coords[0][1])
+            name.append(folder[i])
+    location = pd.DataFrame(np.array([name,lon,lat]).T,columns=['name','lon','lat'])
+    location.to_csv(r'F:\Data\Demand\location.csv')
+
+
+
+def combine_tables():
+    #
+    # combine tables for all years
+    #
+
+    # covert UTC + 0:00 to loctime
+    timezones = pd.read_excel(r'F:\Data\Demand\Timezone.xlsx')
+            
+    path = r'F:\Data\Demand\train\tables'
+    files = os.listdir(path)
+    for i in range(0,len(files)):
+        d = pd.read_excel( os.path.join(path,files[i]) )
+        tz = float(timezones[timezones['name'] == files[i][:-5]]['timezone'])
+        dt = [datetime.datetime(d['year'][j],d['month'][j],d['day'][j],d['hour'][j]) + datetime.timedelta(hours=tz) for j in range(len(d))]
+        d['year'] = [dt[j].year for j in range(len(dt))]
+        d['month'] = [dt[j].month for j in range(len(dt))]
+        d['day'] = [dt[j].day for j in range(len(dt))]
+        d['hour'] = [dt[j].hour for j in range(len(dt))] 
+        if i == 0:
+            data = d
+        else:
+            data = pd.concat((data,d))       
+        print(i)
+        
+    # remove columns not used
+    data = data.drop(['Unnamed: 0','minitue','time','city','Date'], axis=1) 
+    data = data[ (~pd.isna(data['demand_MW'])) & (data['demand_MW']!=0)] 
+    data = data.reset_index(drop=True)
+    
+    # add weekday: 1-7
+    weekday = [datetime.date(data['year'][i], data['month'][i], data['day'][i]).isoweekday() for i in range(len(data))]
+    data['weekday'] = weekday
+    
+    # add other indicators 
+    data['demand_perCapita'] = data['demand_MW']/data['pop']*1000 # kWh per capita
+    data['gdp_perCapita'] = data['gdp']/data['pop']*1000000  # ppp(2011 dollar) per capita
+    for c in ['ENE', 'RCO', 'NMM', 'CHE', 'IRO', 'NFE']:
+        data[c] = data[c] / data['pop'] * 1e+6 #kg CO2 /pop /km-2
+
+    # combine lon/lat information
+    location = pd.read_csv(r'F:\Data\Demand\location.csv', index_col=0)
+    data = pd.merge(data,location,on='name',how='left')
+    return data
+
+
+
+def revised_city_dp(data):
+    #
+    # Modify the city demand_perCapita by replacing corresponding pop data
+    #
+    import re
+    dicts = pd.read_excel(r'F:\Data\Energy-master\data\census\XLSX_WUP2014-F12-Cities_Over_300K.xlsx', sheet_name='DATA')
+    dicts.columns = dicts.iloc[15]
+    dicts = dicts.iloc[16:]
+    
+    urban_pop = np.full((36,21), np.nan, dtype=np.float32)
+    folder = os.listdir(os.path.join(r'F:\Data\Demand\city'))
+    for i in range(0,len(folder)):       
+        pop = np.full(21,np.nan,dtype=np.float32)
+        #country=re.split('_',folder[i])[1]
+        city = re.split('_',folder[i])[0]
+        if city == 'Beirut':
+            city = 'Bayrut (Beirut)'
+        if city == 'Los Angeles':
+            city = 'Los Angeles-Long Beach-Santa Ana'
+        if city == 'City of North Little Rock':
+            city = 'Little Rock'
+        if city == 'Springfield':
+            city = 'Springfield, Missouri'
+        z = dicts[(dicts['Urban Agglomeration']==city)][[2000,2005,2010,2015,2020]]
+        if len(z) == 1:
+            for year in [2000,2005,2010,2015,2020]:
+                pop[year-2000] = z[year]
+            pop = pd.Series(pop).interpolate()
+            urban_pop[i,:] = pop
+        else:
+            print(i,city)
+            
+    import warnings
+    warnings.filterwarnings('ignore')
+    
+    data = data[~data['name'].isin(['Eugene_US','IslaSaoNicolau_CaboVerde','Kupang_Indonesia','Tacoma_US','Tema_Ghana','Louisville_US'])] 
+    folder = os.listdir(os.path.join(r'F:\Data\Demand\city'))
+    for i in range(0,len(folder)):  
+        if folder[i] in ['Eugene_US','IslaSaoNicolau_CaboVerde','Kupang_Indonesia','Tacoma_US','Tema_Ghana','Antigua_Guatemala','NewYorkCity_US','MbabaneCity_Swaziland']:  
+            continue
+        else:
+            z = data[data['name']==folder[i]] 
+            for year in np.unique(z['year']):
+                data['demand_perCapita'][(data['year']==year)&(data['name']==folder[i])]=data['demand_MW'][(data['year']==year)&(data['name']==folder[i])] / urban_pop[i,year-2000]
+            print(folder[i])
+    return data
+
+
+
+def revised_city_gp(data):
+    #
+    # Modify the city gdp_perCapita by replacing corresponding pop data
+    #
+    folder = os.listdir(os.path.join(r'F:\Data\Demand\city'))
+    city_gdp = pd.read_csv(r'F:\Data\Demand\city_gdp_perCapita.csv',index_col=0)
+    for i in range(0,len(city_gdp)):  
+        if city_gdp.index[i] in ['Eugene_US','IslaSaoNicolau_CaboVerde','Kupang_Indonesia','Tacoma_US','Tema_Ghana','Antigua_Guatemala','NewYorkCity_US','MbabaneCity_Swaziland','Louisville_US']:  
+            continue
+        else:
+            z=data[data['name']==city_gdp.index[i]] 
+            for year in np.unique(z['year']):
+                data['gdp_perCapita'][(data['year']==year)&(data['name']==city_gdp.index[i])]=city_gdp[str(year)][i]
+            print(folder[i])
+    return data
+
+
+
+def revised_nation_region_gp(data):
+    #
+    # Revised the national and regional gdp_perCapita
+    #
+    nation_region_gdp = pd.read_csv(r'F:\Data\Demand\nation_region_gdp_perCapita.csv',index_col=0)
+    for i in range(0,len(nation_region_gdp)):  
+        z = data[data['name']==nation_region_gdp.index[i]] 
+        for year in np.unique(z['year']):
+            if year == 2020:
+                year_i = 2019
+            elif year == 1999:
+                year_i = 2000
+            else:
+                year_i = year
+            data['gdp_perCapita'][(data['year']==year)&(data['name']==nation_region_gdp.index[i])]=nation_region_gdp[str(year_i)][i]
+        print(i)
+    return data
+
+
+#
+# main
+#
+data = combine_tables()
+data = revised_city_dp(data)
+data = revised_city_gp(data)
+data = revised_nation_region_gp(data)
+
+#
+# save data
+#
+data.to_csv(r'F:\Data\Demand\train\train_data.csv')
+
+
+
+
