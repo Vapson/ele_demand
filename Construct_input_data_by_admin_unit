@@ -1,0 +1,222 @@
+# -*- coding: utf-8 -*-
+
+#
+# construct input data by admin unit for prediction
+#
+
+import geopandas as gpd
+import os
+os.chdir(r'F:\Data\Demand\train')
+
+import math
+import xarray as xr
+import rioxarray
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+
+
+
+# In[temp,pop,gdp]
+def read_data(year):  
+    
+    global admini, maps, temp, pop, gdp, nlt_data
+    
+    admini = xr.open_dataset(r'F:\Data\Demand\global_predict\boundary\admin_areas.nc')
+    admini = admini['admin_units']
+    maps=np.meshgrid(admini.longitude,admini.latitude)
+    
+    #
+    # read pop data
+    #
+    pop = xr.open_rasterio(r'F:\Data\Landscan_pop\landscan-global-'+str(year)+'.tif')
+    pop.values[pop.values == pop.nodatavals] = 0
+    pop.rio.write_crs("EPSG:4326", inplace=True)
+    pop.rio.set_spatial_dims(x_dim='x', y_dim='y', inplace=True) 
+    
+    #
+    # read gdp per capita data
+    #
+    gdp = xr.open_rasterio(r'F:\Data\GDP_PPP\GDP_per_capita_PPP_'+str(year)+'.tif')
+    gdp.values[gdp.values==gdp.nodatavals] = 0
+    gdp.values[gdp.values<0] = 0
+    
+    #
+    # read nightlight data
+    #    
+    if year>=2014:
+        nlt_data =  xr.open_dataset(r'F:\Data\harmonized global NTL dataset\Harmonized_DN_NTL_'+str(year)+'_simVIIRS.tif')
+        
+    else:
+        nlt_data =  xr.open_dataset(r'F:\Data\harmonized global NTL dataset\Harmonized_DN_NTL_'+str(year)+'_calDMSP.tif')
+     
+    # lon_axis      
+    nsamples = pop.shape[2] + 1
+    bins_x = np.linspace(pop.x.min(),pop.x.max(), nsamples)#.astype(int)    
+    
+    #lat_axis
+    nsamples = pop.shape[1] + 1
+    bins_y = np.linspace(pop.y.min(),pop.y.max(), nsamples)#.astype(int)     
+    
+    nlt_data = nlt_data['band_data'].groupby_bins('x', bins_x).mean().groupby_bins('y', bins_y).mean() 
+    nlt_data.values[np.isnan(nlt_data.values)]=0 
+    nlt_data  = nlt_data.sortby(nlt_data.y_bins,ascending= False)
+    nlt_data = xr.DataArray(nlt_data[0,:].values * pop[0,:], #prepare for add weight(pop),
+                            dims=['y','x'],coords={'y': pop.y.values,'x': pop.x.values})
+    
+    nlt_data.rio.write_crs("EPSG:4326", inplace=True)
+    nlt_data.rio.set_spatial_dims(x_dim='x', y_dim='y', inplace=True)     
+    del nsamples, bins_x, bins_y
+
+    #
+    # read temperature data and change longitude extent 
+    #    
+    temp = xr.open_dataset('H:\\ERA5\\'+str(year)+'_temp.nc')
+    temp.coords['longitude'] = (temp.coords['longitude'] + 180) % 360 - 180
+    temp  = temp.sortby(temp.longitude)   
+
+
+
+def construct_data_by_region(i):
+    #
+    # construct_data_by_region i (index of admin data)
+    #
+    boundary=gpd.read_file(r'F:\Data\Demand\global_predict\boundary\admin_polygen.shp' )
+    co2_sector_name = ['ENE','CHE','IRO','NFE','NMM','RCO']
+    if ~np.isnan(i):    
+        
+        bools = admini.values==i  
+        re_gdp = np.nanmean(gdp[0,:].values[bools])
+        
+        if re_gdp != 0 and ~np.isnan(re_gdp):
+            #
+            # extract boundary
+            #
+            index = boundary[boundary['RASTERVALU']==i].index
+            select = gpd.GeoDataFrame(boundary.loc[index])
+            geo = select.geometry.iloc[0]
+            
+            lon_min, lat_min, lon_max, lat_max = geo.bounds
+            
+            # extract population
+            out_pop = pop[0,:].sel(x = slice(lon_min,lon_max),y = slice( lat_max,lat_min)) 
+            out_pop = out_pop.rio.clip(select.geometry, boundary.crs, drop=False)
+            p = np.sum(out_pop.values[out_pop.values != out_pop._FillValue])
+            
+            # extract nightlight
+            nlt = nlt_data.sel(x=slice(lon_min,lon_max),y=slice( lat_max,lat_min))    
+            nlt = nlt.rio.clip( select.geometry,boundary.crs,drop=False)
+            n = np.sum(nlt.values[nlt.values!=nlt._FillValue])/p
+            
+            #
+            # extract co2 data
+            # 
+            if year%4 == 0:
+                days = 366
+            else:
+                days = 365       
+            
+
+            #ENE\REF_TRF\IND\TRO_noRES\TNR_Other\RCO\PRO\NMM\CHE\IRO\NFE\NEU\
+            co2_sector = np.full(len(co2_sector_name), 0, dtype = np.float32)
+            for s in range(len(co2_sector_name)):
+                co2 = xr.open_dataset('H:\\EDGAR\\'+'v7.0_FT2021_CO2_excl_short-cycle_org_C_' + str(year) + '_' + co2_sector_name[s] + '.0.1x0.1.nc')
+
+                co2.coords['lon'] = (co2.coords['lon'] + 180) % 360 - 180
+                co2  = co2.sortby(co2.lon)  
+                co2  = co2.sortby(co2.lat,ascending= False)
+                
+                co2.rio.write_crs("EPSG:4326", inplace=True)
+                co2 = co2.rio.set_spatial_dims(x_dim='lon', y_dim='lat', inplace=True) 
+                
+                out_co2 = co2.rio.clip( select.geometry,boundary.crs,drop=False)
+                co2_sector[s] = np.nansum( out_co2['emi_co2']*24*60*60*days ) # units: kg CO2 m-2 s-1  --> kg/year/m2         
+                
+            # extract lon/lat
+            lon = maps[0][bools]
+            lat = maps[1][bools]
+            
+            lon_min = lon.min()
+            lat_min = lat.min()
+            lon_max = lon.max()
+            lat_max = lat.max()
+            
+                
+            # deal with the case the range is too small and no grid is selected
+            lat_max = 0.25 * math.ceil(lat_max / 0.25)    
+            lat_min = 0.25 * math.floor(lat_min / 0.25)  
+            lon_max = 0.25 * math.ceil(lon_max / 0.25) 
+            lon_min = 0.25 * math.floor(lon_min / 0.25) 
+                
+            # extract temperature data according to admin units and add zonal weight (pop)
+            ref = admini.sel(longitude=slice(lon_min,lon_max),latitude=slice( lat_max,lat_min))
+            re_temp = temp['t2m'].sel(longitude=slice(lon_min,lon_max),latitude=slice( lat_max,lat_min))
+            re_pop = pop[0,:].sel(x=slice(lon_min,lon_max),y=slice( lat_max,lat_min))
+
+
+            # lon_axis
+            nsamples = ref.shape[1] + 1
+            bins_x = np.linspace(ref.longitude.min(),ref.longitude.max(), nsamples)#.astype(int)
+
+            #lat_axis
+            nsamples = ref.shape[0] + 1
+            bins_y = np.linspace(ref.latitude.min(),ref.latitude.max(), nsamples)#.astype(int)  
+
+            re_pop = re_pop.groupby_bins('x', bins_x).sum().groupby_bins('y', bins_y).sum()
+            re_pop = re_pop.sortby(re_pop.y_bins, ascending= False)
+            re_pop = xr.DataArray(re_pop.values, dims=['y','x'], coords={'y': ref.latitude.values, 'x': ref.longitude.values})
+
+            re_bool = ref.values!=i
+            re_pop.values[re_bool] = 0
+            
+            if np.sum(re_pop.values) == 0: 
+                yy = np.mean(lat)
+                xx = np.mean(lon)          
+            else:
+                yy = np.average(lat, weights = re_pop.values[~re_bool])
+                xx = np.average(lon, weights = re_pop.values[~re_bool])
+                
+
+            # lon_axis
+            nsamples = re_temp.shape[2] + 1
+            bins_x = np.linspace(re_temp.longitude.min(),re_temp.longitude.max(), nsamples)
+            
+            #lat_axis
+            nsamples = re_temp.shape[1] + 1
+            bins_y = np.linspace(re_temp.latitude.min(),re_temp.latitude.max(), nsamples)
+            
+            re_pop = re_pop.groupby_bins('x', bins_x).sum().groupby_bins('y', bins_y).sum()
+            re_pop = re_pop.sortby(re_pop.y_bins,ascending= False) 
+            re_pop.values[re_pop.values<=0]=0
+            
+            if np.sum(re_pop.values)==0:
+                weighted_ave_temp = [np.mean(re_temp[cum_hour,:].values) for cum_hour in range(re_temp.shape[0])]
+                weighted_ave_temp = np.array(weighted_ave_temp)-273.15
+            else:
+                weighted_ave_temp=[np.average(re_temp[cum_hour,:].values, weights=re_pop.values) for cum_hour in range(re_temp.shape[0])]
+                weighted_ave_temp = np.array(weighted_ave_temp)-273.15
+            del re_temp
+            return re_gdp, p, weighted_ave_temp, xx, yy, n, co2_sector
+        else:
+            return [-1,-1,-1,-1,-1,-1,-1] 
+    else:
+        return [-1,-1,-1,-1,-1,-1,-1]        
+    
+    
+#
+# main 
+#
+year = 2000 # change the year if needed
+read_data(year)
+length = len(np.unique(admini.values))  
+unique_id = np.unique(admini.values)    
+inputs = [unique_id[i] for i in range(length) if ~np.isnan(unique_id[i])] 
+
+import datetime
+r=[]
+for i in range(0,len(inputs)):
+    r.append(construct_data_by_region(inputs[i]))
+    print(i,datetime.datetime.now())
+
+import joblib
+joblib.dump(r,'F:\\Data\Demand\\global_predict\\'+str(year)+'_inputs.pkl')
