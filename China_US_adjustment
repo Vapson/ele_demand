@@ -1,0 +1,138 @@
+# -*- coding: utf-8 -*-
+
+#
+# Incorporating monthly or annual data of the United States and China for adjustment
+#
+
+import pandas as pd
+import numpy as np
+import os
+import xarray as xr
+import rioxarray
+import datetime
+
+
+
+#
+# estimating the 2000 data in US
+#
+
+o_US_path = r'F:\Data\Demand\global_predict\adjust\Retail_sales_of_electricity_USA_clean.csv'
+o_US = pd.read_csv(o_US_path)
+
+monthly_data = np.full((51,12,22),np.nan,dtype=np.float32)
+for year in range(2001,2023):
+    for m in range(0,12):
+        date = str(year) + '/' + str(m+1) + '/' + str(1)
+        o = o_US[date]
+        monthly_data[:,m,year-2001] = o
+
+
+# MK test
+estimates_2000 = np.full((51,12),np.nan,dtype=np.float32)
+import pymannkendall as mk
+for loc in range(51):
+    for m in range(0,12):
+        y = monthly_data[loc,m,:]
+        results = mk.original_test(y)
+        if results.h:
+            #print(loc,results.p)
+            #results.slope
+            results.intercept
+            estimates_2000[loc,m] = results.intercept
+        else:
+            #print(loc,m)
+            estimates_2000[loc,m] = np.mean(y)
+            
+for m in range(0,12):            
+    date = str(2000) + '/' + str(m+1) + '/' + str(1)
+    o_US [date] = estimates_2000[:,m]
+o_US.to_csv(o_US_path)
+
+
+
+
+#
+# adjust process
+#
+
+# read actual demand data in China and US
+o_China_path = r'F:\Data\Demand\global_predict\adjust\AnnualbyProvince_China.xls'
+o_China = pd.read_excel(o_China_path)
+numbers_China = np.unique(o_China['RASTERVALU'])
+
+
+o_US_path = r'F:\Data\Demand\global_predict\adjust\Retail_sales_of_electricity_USA_clean.csv'
+o_US = pd.read_csv(o_US_path)
+numbers_US = np.unique(o_US['RASTERVALU'])
+
+
+# read original admin boundary and adjusted admini boundaries
+admin_path = r'F:\Data\Demand\global_predict\boundary\admin_areas.nc'
+admin_ori = xr.open_dataset(admin_path)['admin_units'].values
+
+admin_path = r'F:\Data\Demand\global_predict\adjust\admin_areas_adjust.tif'
+admin_adjust = xr.open_dataset(admin_path)['band_data'][0,:].values
+
+
+# read ori_results
+name='demand'
+path = r'F:\Data\Demand\global_predict\estimates\Maps'
+for year in range(2000,2020):
+    file = os.path.join(path,'global_load_'+str(year)+'.nc')
+    f = xr.open_dataset(file)
+    data = f['load_upper_boundary']
+
+    data = data.values
+    new_data = data.copy()
+    
+    #
+    # China : adjust by annual electricity consumption
+    #
+    for number in numbers_China:
+        o = o_China[o_China['RASTERVALU']==number][year].iloc[0] * 1e+5 # --> MWh
+        number_ori = int(str(number)[:4])
+        timeseries = [data[i,:][admin_ori==number_ori].mean() for i in range(data.shape[0])]
+        ratio = o / np.sum(timeseries)
+        
+        bools = admin_adjust==number
+        t = np.repeat(np.array(timeseries) * ratio, len(bools[bools])).reshape(data.shape[0],len(bools[bools]))
+        new_data[:,bools] = t
+    print('China: finish')
+        
+    #
+    # US : adjust by month electricity consumption
+    #         
+    time = f['time']
+    time = pd.to_datetime(time.values)
+    months = np.array([time[i].month for i in range(data.shape[0])])
+    for number in numbers_US:
+        bools = admin_adjust==number
+        for month in range(1,13):
+            date = str(year) + '/' + str(month) + '/' + str(1)
+            o = o_US[o_US['RASTERVALU']==number][date].iloc[0] * 1e+3 # --> MWh
+            
+            m = months==month
+            timeseries = [data[i,:][admin_ori==number].mean() for i in range(data.shape[0]) if m[i]]
+            ratio = o / np.sum(timeseries)
+     
+            t = np.repeat(np.array(timeseries) * ratio, len(bools[bools])).reshape(len(m[m]),len(bools[bools]))    
+            if month == 1:
+                t_combine = t
+            else:
+                t_combine = np.concatenate([t_combine,t],axis=0)
+        new_data[:,bools] = t_combine
+    print('US: finish')
+    
+    masks = np.isnan(admin_adjust)
+    new_data[:,masks] = np.nan
+    
+    maps = xr.DataArray(new_data,dims=['time','y','x'], name=name,
+                        coords={'y': f.y.values,'x': f.x.values,'time':f.time.values})
+    maps.attrs['units'] = 'MWh'
+    
+    maps.to_netcdf(r'F:\Data\Demand\global_predict\adjust\Maps\global_' + name + '_' + str(year)+'.nc', 
+                   encoding={name: {'zlib': True, 'complevel': 9}}) 
+    del data, new_data, maps
+    print('save: finish',year,datetime.datetime.now())
+
