@@ -152,7 +152,7 @@ for y in range(0,len(years)):
         #
         # read CO2 emission data by sector
         #     
-        for s in range(len(sector)):
+        for s in range(len(co2_sector_name)):
             co2 = xr.open_dataset('H:\\EDGAR\\'+'v7.0_FT2021_CO2_excl_short-cycle_org_C_' + str(year) + '_' + co2_sector_name[s] + '.0.1x0.1.nc')
             co2.coords['lon'] = (co2.coords['lon'] + 180) % 360 - 180
             co2  = co2.sortby(co2.lon)  
