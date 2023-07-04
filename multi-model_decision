@@ -1,0 +1,226 @@
+# -*- coding: utf-8 -*-
+
+#
+# multi-model decision
+#
+
+import pandas as pd
+import numpy as np
+import joblib
+import os
+
+def read_inputs(year):
+    r = joblib.load('F:\\Data\\Demand\\global_predict\\inputs\\'+str(year)+'_inputs.pkl')
+    gdp_perCapita = [r[i][0] for i in range(len(r))]
+    filters = np.where(np.array(gdp_perCapita)!=-1)[0]
+    r = [r[i] for i in range(len(r)) if i in filters]
+    return r
+
+
+def read_multi_model_results(year):
+    if year % 4 == 0:
+        days = 366
+    else:
+        days = 365
+        
+    data_common = np.full((3,days,1683),np.nan,dtype=np.float32) 
+    i = 0          
+    for class_id in [5,6,7]:
+        filename = 'estimates_'+str(class_id)+'_'+str(year)+'.pkl'
+        results = joblib.load( os.path.join(r'F:\Data\Demand\global_predict\estimates',str(year),filename) )
+        data_common[i,:] = results    
+        i = i + 1        
+              
+    data_resource = np.full((4,days,1683),np.nan,dtype=np.float32)    
+    i = 0       
+    for class_id in [2,3,4,1]:
+        filename = 'estimates_'+str(class_id)+'_'+str(year)+'.pkl'
+        results = joblib.load( os.path.join(r'F:\Data\Demand\global_predict\estimates',str(year),filename) )
+        data_resource[i,:] = results
+        i = i+1
+    return data_common, data_resource
+
+
+
+
+def percentile_estimate():  
+    #
+    # Emission levels are estimated using the quantile method, 
+    # that is, the quantile of the emission level in a given region 
+    # relative to the annual average emission level across all regions worldwide
+    #
+    percentile = np.full((6, 20, 1683), np.nan, dtype = np.float32)
+
+    number = [0,7,8,9,10,5] # order : ENE NMM CHE IRO NFE RCO 
+    for year in range(2000,2020):
+        r = read_inputs(year)       
+        for j in range(0, 6):   
+            n = number[j]        
+            value = np.array([(r[i][10][n]) / r[i][1] * 1e+6 for i in range(len(r))])         
+            percentile[j,year-2000,:] = [(1 - np.count_nonzero(value[i] <= value) / value.size) for i in range(len(value))]
+ 
+    percentile = percentile.mean(1)
+    return percentile
+  
+
+
+
+def combines(year, data_common, data_resource):
+    # load the fiile of quantile of the emission level in 1683 regions
+    percentile = percentile_estimate()
+    
+    if year % 4 == 0:
+        days = 366
+    else:
+        days = 365
+        
+    combine_results = np.full((7, days, 1683),np.nan,dtype=np.float32)           
+    for i in range(1683):   
+        #
+        # specific-sector model
+        #
+        # model 2, ENE
+        if percentile[0,i] > 0.9:
+            combine_results[0,:,i] = data_resource[0,:,i]        
+            
+        # model 3, CHE
+        if percentile[2,i] > 0.99:
+            combine_results[1,:,i] = data_resource[1,:,i]
+                 
+        # model 4, NFE
+        if percentile[4,i] > 0.99:
+            combine_results[2,:,i] = data_resource[2,:,i]   
+            
+        # model 1
+        resource = [percentile[0,i] > 0.9,
+                    percentile[1,i] > 0.99,
+                    percentile[2,i] > 0.98,
+                    percentile[3,i] > 0.97,
+                    percentile[4,i] > 0.97]
+        resource = [resource[i] for i in range(len(resource)) if resource[i]]
+        #
+        # multi-model decision
+        #
+        if len(resource) >= 2:
+            combine_results[3,:,i] = data_resource[3,:,i] 
+            
+        elif percentile[0,i]>0.9 or percentile[1,i]>0.99 or percentile[2,i]>0.98 or percentile[3,i]>0.97 or percentile[4,i]>0.97:
+            combine_results[3,:,i] = data_resource[3,:,i] 
+            combine_results[4:,:,i] = data_common[:,:,i]
+            
+        else:
+            combine_results[4:,:,i] = data_common[:,:,i] 
+
+            
+    r = read_inputs(year) 
+    
+    #
+    # outlier filtering
+    #
+    for j in range(1683):        
+        if combine_results[4,:,j].sum() > 15000:
+            combine_results[4,:,j] = np.nan
+            
+        if combine_results[5,:,j].sum() > 15000:
+            combine_results[5,:,j] = np.nan
+            
+        if combine_results[6,:,j].sum() > 15000:
+            combine_results[6,:,j] = np.nan    
+            
+        if combine_results[4,:,j].sum() < 2000 and ~np.isnan(np.nansum(combine_results[:3,:,j])) and percentile[5,j] > 0.4:
+            combine_results[4,:,j] = np.nan 
+            
+        if ~np.isnan(np.nansum(combine_results[:3,:,j])) and percentile[5,j] < 0.1:
+            combine_results[5,:,j] = np.nan 
+            combine_results[6,:,j] = np.nan 
+            
+        if r[j][0] < 5000 and combine_results[4,:,j].sum() > 5000:
+            combine_results[4,:,j] = np.nan 
+            
+        if r[j][0] < 5000 and combine_results[5,:,j].sum() > 5000:
+            combine_results[5,:,j] = np.nan   
+            
+        if r[j][0] < 5000 and combine_results[6,:,j].sum() > 5000:
+            combine_results[6,:,j] = np.nan   
+    return combine_results
+
+
+
+def annual_smooth(x):
+    #
+    # interannual sliding average, return the ratio of the annual sliding average to the original value
+    #
+    x = pd.Series(x)
+    x_roll = x.rolling(2).mean()
+    sigma = x_roll/x
+    sigma[0] = 1
+    return np.array(sigma)
+
+
+#
+# main
+#
+
+# read data
+data_commons = np.full((20,3,1683),np.nan,dtype=np.float32)
+data_resources = np.full((20,4,1683),np.nan,dtype=np.float32)
+for year in range(2000,2020):
+    data_common, data_resource = read_multi_model_results(year)
+    data_commons[year-2000,:] = data_common.sum(1)
+    data_resources[year-2000,:] = data_resource.sum(1)
+
+# interannual sliding average
+sigma = np.full((4,20,1683), np.nan, dtype=np.float32)
+for x in range(4):
+    for i in range(1683):
+        sigma[x,:,i] = annual_smooth(data_resources[:,x,i][::-1])[::-1] 
+        
+
+# outlier filtering        
+z_commons = []
+for x in range(3):    
+    z = [np.max(data_commons[:,x,i]) / np.min(data_commons[:,x,i]) for i in range(1683)]
+    z_max = [np.max(data_commons[:,x,i]) for i in range(1683)]
+    z_commons.append( np.where((np.array(z)>2)&(np.array(z_max)>10000)) )
+
+
+# generating final results
+filter_index = np.load(r'F:\Data\Demand\global_predict\filters_index.npy') 
+for year in range(2000,2020):  
+    data_common, data_resource = read_multi_model_results(year)
+    
+    # industry-driven model
+    for x in range(4):
+        for j in range(1683):
+            data_resource[x,:,j] = data_resource[x,:,j] * sigma[x,year-2000,j]
+            
+    # economy-driven model
+    for x in range(3):
+        iis = z_commons[x][0]
+        for ii in iis: 
+            data_common[x,:,ii] = np.nan        
+    combine_results = combines(year, data_common, data_resource)
+    
+    # mask
+    admin_number = [2288, 2289, 2290, 2291, 2292, # Finland
+                    # Iceland
+                    352, 
+                    # Norway
+                    2171,  2172,  2173,  2174,  2175,  2176,  2177,  2178,
+                    2179,  2180,  2181,  2182,  2183,  2184,  2185,  2186,
+                    2187,  2189, 10005,
+                    # Sweden
+                    1981, 1982, 1983, 1984, 1985, 1986, 1987, 1988, 1989,
+                    1990, 1991, 1992, 1993, 1994, 1995, 1996, 1997, 1998,
+                    1999, 2000, 2001]
+    f = [int(np.where(filter_index == admin_number[i])[0]) for i in range(len(admin_number))]
+    
+    for fx in f:
+        combine_results[:,:,fx] =  combine_results[:,:,fx] * np.nan
+    
+    #
+    # save
+    #
+    filename = 'estimates_'+str(year)+'.npy'
+    np.save(os.path.join(r'F:\Data\Demand\global_predict\estimates',str(year),filename),combine_results)
+
