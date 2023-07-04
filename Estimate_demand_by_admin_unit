@@ -1,0 +1,191 @@
+# -*- coding: utf-8 -*-
+#
+# Estimate the demand data by admin unit
+#
+
+import os
+os.chdir(r'F:\Data\Demand\train_by_day')
+
+
+import xarray as xr
+import rioxarray
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+import joblib
+
+import datetime
+def TimeZone(lon):
+    #
+    # simple timezone estimating function: divide the time zone by longitude
+    #
+    zone = lon // 15
+    if lon % 15 > 7.5:
+        zone = zone+1
+    zone = int(zone)
+    return zone      
+
+
+
+
+def prepare_data(year):
+    # read input data
+    r=joblib.load('F:\\Data\\Demand\\global_predict\\inputs\\'+str(year)+'_inputs.pkl')
+    
+    # get time file from temperature data
+    temp = xr.open_dataset('H:\\ERA5\\'+str(year)+'_temp.nc')
+    temp_time = temp['t2m']['time'].values.astype('datetime64[s]').tolist()
+    del temp
+    
+    # get admin unit data and remove the lacking part
+    admini=xr.open_dataset(r'F:\Data\Demand\global_predict\boundary\admin_areas.nc')
+    unique_id=np.unique(admini['admin_units'].values)    
+    
+    gdp_perCapita = [r[i][0] for i in range(len(r))]
+    filters=np.where(np.array(gdp_perCapita)!=-1)[0]
+    
+    filters_index=unique_id[filters]
+    #np.save('filters_index.npy',filters_index)
+    
+    #
+    # combine
+    #
+    gdp_perCapita = [r[i][0] for i in range(len(r)) if i in filters]
+    pop_r = [r[i][1] for i in range(len(r)) if i in filters]
+    temp_r =  [r[i][2] for i in range(len(r)) if i in filters]
+    temp_r = np.array(temp_r, dtype=np.float32).T
+    
+    xx_r = [r[i][7] for i in range(len(r)) if i in filters]
+    yy_r = [r[i][8] for i in range(len(r)) if i in filters]
+    nlt = [r[i][9] for i in range(len(r)) if i in filters]
+    
+    co2_ENE = [r[i][10][0] for i in range(len(r)) if i in filters]
+    co2_RCO = [r[i][10][5] for i in range(len(r)) if i in filters]
+    co2_NMM = [r[i][10][7] for i in range(len(r)) if i in filters]
+    co2_CHE = [r[i][10][8] for i in range(len(r)) if i in filters]
+    co2_IRO = [r[i][10][9] for i in range(len(r)) if i in filters]
+    co2_NFE = [r[i][10][10] for i in range(len(r)) if i in filters]
+    
+    # get time features
+    tz = [TimeZone(xx_r[i]) for i in range(len(xx_r))]
+    dt = [[temp_time[j] + datetime.timedelta(hours = tz[i]) for j in range(len(temp_time))] for i in range(len(xx_r))]
+    m = [[dt[i][j].month for j in range(len(temp_time))] for i in range(len(dt))]
+    d = [[dt[i][j].day for j in range(len(temp_time))] for i in range(len(dt))]
+    h = [[dt[i][j].hour for j in range(len(temp_time))] for i in range(len(dt))]
+    
+    return gdp_perCapita, pop_r, xx_r, yy_r, nlt, co2_ENE, co2_RCO, co2_NMM, co2_CHE, co2_IRO, co2_NFE, tz, m, d, h, temp_r, filters_index
+
+
+
+#
+# main
+#
+for year in range(2000,2020):
+    #
+    # prepare data
+    #
+    gdp_perCapita, pop_r, xx_r, yy_r, nlts, co2_ENE, co2_RCO, co2_NMM, co2_CHE, co2_IRO, co2_NFE, tz, m, d, h, temp_r, filters_index = prepare_data(year)
+    
+    
+    #
+    # load model and predict
+    #
+    for class_id in [1,2,3,4,5,7,6]:
+        model=joblib.load(r'F:\Data\Demand\global_predict\models\model_'+str(class_id)+'.pkl') 
+        
+        #
+        # predict
+        #
+        for i in range(len(h)):
+            days = int(len(h[i])/24)
+            
+            doy = np.arange(tz[i],len(h[i])+tz[i],1)//24
+                    
+            temp_mean = [temp_r[:,i][doy==index].mean() for index in range(days)]
+            temp_min = [temp_r[:,i][doy==index].min() for index in range(days)]
+            temp_max = [temp_r[:,i][doy==index].max() for index in range(days)]
+            
+            month = [np.array(m[i])[doy==index].mean() for index in range(days)]
+            day = [np.array(d[i])[doy==index].mean() for index in range(days)]
+            weekday = [datetime.date(year,int(month[j]),int(day[j])).isoweekday() for j in range(days)]
+            
+            #
+            # cal co2 perPop 
+            #                
+            co2_ENE_perPop = [co2_ENE[i]/pop_r[i]*1e+6 for j in range(days)]
+            co2_RCO_perPop = [co2_RCO[i]/pop_r[i]*1e+6 for j in range(days)]
+            co2_NMM_perPop = [co2_NMM[i]/pop_r[i]*1e+6 for j in range(days)]
+            co2_CHE_perPop = [co2_CHE[i]/pop_r[i]*1e+6 for j in range(days)]
+            co2_IRO_perPop = [co2_IRO[i]/pop_r[i]*1e+6 for j in range(days)]
+            co2_NFE_perPop = [co2_NFE[i]/pop_r[i]*1e+6 for j in range(days)]
+            
+        
+            # combine X data
+            #      
+            g = [gdp_perCapita[i] for index in range(days)] 
+            yy = [yy_r[i] for index in range(days)] 
+            nlt = [nlts[i] for index in range(days)]
+                 
+            #class 1
+            if class_id==1:       
+                X = np.array([month, day, weekday, g,
+                              co2_ENE_perPop, co2_NMM_perPop,co2_CHE_perPop,co2_IRO_perPop,co2_NFE_perPop,
+                               nlt, temp_mean, temp_min, temp_max],dtype=np.float32).T 
+            
+            #class 2 
+            if class_id == 2:      
+                X = np.array([month, day, weekday, g, 
+                              co2_ENE_perPop, 
+                              nlt, temp_mean, temp_min, temp_max],dtype=np.float32).T     
+        
+            #class 3
+            if class_id == 3:                         
+                X = np.array([month, day, weekday, g, 
+                              co2_CHE_perPop,
+                              nlt, temp_mean, temp_min, temp_max],dtype=np.float32).T    
+            
+    
+            #class 4
+            if class_id == 4:        
+                X = np.array([month, day, weekday, g,
+                              co2_NFE_perPop,
+                              nlt, temp_mean, temp_min, temp_max],dtype=np.float32).T    
+                
+            #class 5
+            if class_id == 5:        
+                X = np.array([month, day, weekday, g,
+                              co2_RCO_perPop, 
+                              nlt, temp_mean, temp_min, temp_max],dtype=np.float32).T 
+                
+            #class 6 
+            if class_id == 6:        
+                X = np.array([month, day, weekday, g, yy,
+                              nlt, temp_mean, temp_min, temp_max],dtype=np.float32).T   
+                
+            #class 7
+            if class_id == 7:        
+                X = np.array([month, day, weekday, g, yy,
+                               temp_mean, temp_min, temp_max],dtype=np.float32).T               
+            y = model.predict(X)
+    
+            
+            if i==0:
+                prediction=y.reshape(-1,1)
+            else:
+                prediction=np.concatenate([prediction,y.reshape(-1,1)],axis=1)
+            print(i)
+            
+        
+        prediction[prediction<0] = 0
+        
+        #
+        # Save
+        #
+        if os.path.exists('F:\\Data\\Demand\\global_predict\\estimates\\'+str(year)) == False:
+            os.mkdir('F:\\Data\\Demand\\global_predict\\estimates\\'+str(year))
+            
+        joblib.dump(prediction,
+                    'F:\\Data\\Demand\\global_predict\\estimates\\'+str(year)+'\\estimates_'+str(class_id)+'_'+str(year)+'.pkl')        
+        
+        print('finished save results') 
+
