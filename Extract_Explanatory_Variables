@@ -221,13 +221,13 @@ for i in range(0,len(path)):
 # Modify the city GDP algorithm: GDP is extracted using city central points
 #
 dirs = r'F:\Data\Demand\city'
-path=[]
-folder=os.listdir(dirs)
+path = []
+folder = os.listdir(dirs)
 for i in range(len(folder)):
     path.append(os.path.join(r'F:\Data\Demand\city',folder[i]))
      
     
-years=np.arange(2000,2020,1)
+years = np.arange(2000,2020,1)
 
 #
 # initialization
@@ -237,7 +237,7 @@ for y in range(0,len(years)):
     year = years[y]        
     gdp = xr.open_rasterio(r'F:\Data\GDP_PPP\GDP_per_capita_PPP_'+str(year)+'.tif')
     gdp.rio.write_crs("EPSG:4326", inplace=True)
-    gdp.rio.set_spatial_dims(x_dim='x', y_dim='y', inplace=True)     
+    gdp.rio.set_spatial_dims(x_dim = 'x', y_dim = 'y', inplace = True)     
 
     print('strat:', year, 'clip')
     for i in range(0,len(path)):   
@@ -250,8 +250,7 @@ for y in range(0,len(years)):
             if len(boundary)>1:
                 boundary = boundary.dissolve()
                 
-            # temperature select
-            out_gdp = gdp.rio.clip( boundary.geometry,boundary.crs,drop=False)      
+            out_gdp = gdp.rio.clip( boundary.geometry, boundary.crs, drop=False)      
             g = out_gdp.values[~np.isnan(out_gdp.values)]
             g = g[g != -9]
             elements = np.unique(g)
