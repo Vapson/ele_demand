@@ -1,0 +1,226 @@
+# -*- coding: utf-8 -*-
+
+#
+# LightGBM model training
+#
+
+import numpy as np
+import pandas as pd
+import lightgbm
+from sklearn.model_selection import train_test_split
+import warnings
+import joblib
+warnings.filterwarnings('ignore')
+
+#
+# Prepare the data
+#
+def read_hourly_train_data():
+    train = pd.read_csv(r'F:\Data\Demand\train\train_data.csv')
+    #
+    # remove some data
+    #
+    i = train[train['name'].isin(['Kansas City_US',
+                                  'Los Angeles_US','Philadelphia_US'
+                                  'City of North Little Rock_US',
+                                  ])]  # Inaccurate estimates exist
+    train = train [~train.index.isin(i.index)]
+
+    i = train[train['name'].isin(['Iceland','Norway','Finland','Sweden'])] 
+    train = train [~train.index.isin(i.index)] # Demand is too high to capture by this model
+
+    #
+    # remove abnormal value
+    #
+    i = train[(train['demand_MW']<=0)|(train['gdp_perCapita']<=0)]#|(train['annual_co2']<=0)
+    train = train [~train.index.isin(i.index)]
+    return train
+
+
+def hourly_to_day(train):
+    #
+    # Delete days with incomplete time series
+    #
+    x = train['demand_MW'].groupby([train['name'],train['year'],train['month'],train['day']]).count()
+    x = x[x == 24]
+    train.set_index(['name','year','month','day'], inplace = True)
+    train = train[train.index.isin(x.index)]
+    train = train.reset_index()
+    del x
+
+    #
+    # concat the data
+    #    
+    demand_day = train['demand_perCapita'].groupby([train['name'],train['year'],train['month'],train['day']]).sum()
+    var = train[['weekday','pop','gdp_perCapita',
+                   'ENE', 'RCO', 'NMM', 'CHE','IRO', 'NFE', 
+                   'lat','nlt']].groupby([train['name'],train['year'],train['month'],train['day']]).mean()
+    temp_mean = train['temp'].groupby([train['name'],train['year'],train['month'],train['day']]).mean()
+    temp_max = train['temp'].groupby([train['name'],train['year'],train['month'],train['day']]).max()
+    temp_min = train['temp'].groupby([train['name'],train['year'],train['month'],train['day']]).min()
+    
+    train_day = pd.concat((demand_day,var,temp_mean,temp_min,temp_max), axis=1)
+    train_day = train_day.reset_index()
+    del demand_day,var,temp_mean,temp_min,temp_max
+    return train_day
+
+
+
+def train_data_day(class_id):
+    #
+    # multi-model training data
+    #    
+    train = read_hourly_train_data()
+    train_day = hourly_to_day(train)
+
+    if class_id == 1:   
+        #
+        # Explanatory variable : ['month', 'day', 'weekday', 'gdp_perCapita', 'ENE', 'NMM', 'CHE', 'IRO','NFE', 'nlt', 'temp_mean', 'temp_min', 'temp_max']
+        #
+        train_day.drop(['year', 'name', 'pop'], inplace=True, axis=1)
+        train_day.drop(['lat'], inplace=True, axis=1) 
+        train_day.drop(['RCO'], inplace=True, axis=1)
+        
+        train_day_high=train_day[(train_day['ENE']>=np.percentile(train_day['ENE'],80))|
+                                 (train_day['NMM']>=np.percentile(train_day['NMM'],80))|
+                                 (train_day['CHE']>=np.percentile(train_day['CHE'],80))|
+                                 (train_day['IRO']>=np.percentile(train_day['IRO'],80))|
+                                 #(train_day['REF_TRF']>=np.percentile(train_day['REF_TRF'],80))|
+                                 (train_day['NFE']>=np.percentile(train_day['NFE'],80))]
+        y = train_day_high.demand_perCapita.values.reshape(-1,1) 
+        train_day_high.drop(['demand_perCapita'], inplace=True, axis=1)  
+        x = train_day_high.values        
+        
+    if class_id == 2: 
+        #
+        # Explanatory variable : ['month', 'day', 'weekday', 'gdp_perCapita', 'ENE', 'nlt', 'temp_mean', 'temp_min', 'temp_max']
+        #
+        train_day.drop(['year', 'name', 'pop'], inplace=True, axis=1)
+        train_day.drop(['lat'], inplace=True, axis=1) 
+        train_day.drop(['RCO', 'NMM', 'CHE', 'IRO','NFE'], inplace=True, axis=1)
+
+        cut = np.percentile(train_day['ENE'],60)
+        train_day_high=train_day[train_day['ENE']>=cut]
+        y = train_day_high.demand_perCapita.values.reshape(-1,1) 
+        train_day_high.drop(['demand_perCapita'], inplace=True, axis=1)  
+        x = train_day_high.values
+
+
+    if class_id == 3:  
+        #
+        # Explanatory variable : ['month', 'day', 'weekday', 'gdp_perCapita', 'CHE', 'nlt', 'temp_mean', 'temp_min', 'temp_max']
+        #
+        train_day.drop(['year', 'name', 'pop'], inplace=True, axis=1)
+        train_day.drop(['lat'], inplace=True, axis=1) 
+        train_day.drop(['RCO','NMM', 'ENE', 'IRO','NFE'], inplace=True, axis=1)
+
+        cut = np.percentile(train_day['CHE'],80)
+        train_day_high = train_day[train_day['CHE']>=cut]
+        y = train_day_high.demand_perCapita.values.reshape(-1,1) 
+        train_day_high.drop(['demand_perCapita'], inplace=True, axis=1)  
+        x = train_day_high.values    
+
+    if class_id == 4:      
+        #
+        # Explanatory variable : ['month', 'day', 'weekday', 'gdp_perCapita', 'NFE', 'nlt', 'temp_mean', 'temp_min', 'temp_max']
+        #
+        train_day.drop(['year', 'name', 'pop'], inplace=True, axis=1)
+        train_day.drop(['lat'], inplace=True, axis=1) 
+        train_day.drop(['RCO', 'NMM', 'CHE', 'IRO','ENE'], inplace=True, axis=1)
+
+        cut = np.percentile(train_day['NFE'],70)
+        train_day_high = train_day[train_day['NFE']>=cut]
+        y = train_day_high.demand_perCapita.values.reshape(-1,1) 
+        train_day_high.drop(['demand_perCapita'], inplace=True, axis=1)  
+        x = train_day_high.values 
+        
+    if class_id == 5:  
+        #
+        # Explanatory variable : ['month', 'day', 'weekday', 'gdp_perCapita', 'RCO', 'nlt', 'temp_mean', 'temp_min', 'temp_max']
+        #
+        train_day.drop(['year', 'name', 'pop'], inplace=True, axis=1)
+        train_day.drop(['lat'], inplace=True, axis=1) 
+        train_day.drop(['ENE', 'NMM', 'CHE', 'IRO', 'NFE'], inplace=True, axis=1)
+       
+        y = train_day.demand_perCapita.values.reshape(-1,1) 
+        train_day.drop(['demand_perCapita'], inplace=True, axis=1)  
+        x = train_day.values    
+        
+    if class_id == 6:        
+        #
+        # Explanatory variable : ['month', 'day', 'weekday', 'gdp_perCapita', 'lat', 'nlt', 'temp_mean', 'temp_min', 'temp_max']
+        #
+        train_day.drop(['year', 'name', 'pop'], inplace = True, axis=1)
+        train_day.drop(['ENE', 'RCO', 'NMM', 'CHE', 'IRO', 'NFE'], inplace=True, axis=1)
+
+        y = train_day.demand_perCapita.values.reshape(-1,1) 
+        train_day.drop(['demand_perCapita'], inplace=True, axis=1)  
+        x = train_day.values         
+  
+    if class_id == 7:            
+        #
+        # Explanatory variable : ['month', 'day', 'weekday', 'gdp_perCapita', 'lat', 'temp_mean', 'temp_min', 'temp_max']
+        #
+        train_day.drop(['year', 'name', 'pop'], inplace=True, axis=1)
+        train_day.drop(['nlt'], inplace = True, axis=1) 
+        train_day.drop(['ENE', 'RCO', 'NMM', 'CHE', 'IRO', 'NFE'], inplace=True, axis=1)
+        
+        y = train_day.demand_perCapita.values.reshape(-1,1) 
+        train_day.drop(['demand_perCapita'], inplace=True, axis=1)  
+        x = train_day.values              
+    return x, y, train_day.columns
+
+
+
+def lightGBM_model(x,y):
+    #
+    # Create training and validation sets
+    #
+    x_train, x_valid, y_train, y_valid = train_test_split(x, y, test_size=0.2, random_state=42)
+    
+    #
+    # Train the model
+    #   
+    parameters = {
+        'objective': 'regression',
+        'metric': {'rmse'},#,'quantile'
+        'boosting': 'goss',
+        'num_leaves': 100,#3500,
+        'max_depth': 20,
+        'min_data_in_leaf':40,
+        'feature_fraction': 1,
+        'bagging_fraction': 1,
+        'bagging_freq': 0,
+        'learning_rate': 0.02,
+        'verbose': 0
+    }
+
+    #
+    # Create the LightGBM data containers
+    #
+    categorical_features = [0,1,2]
+    train_data = lightgbm.Dataset(x_train, label=y_train, categorical_feature=categorical_features,free_raw_data=False)
+    valid_data = lightgbm.Dataset(x_valid, label=y_valid)
+    
+    model = lightgbm.train(parameters,
+                           train_data,
+                           valid_sets=[train_data,valid_data],
+                           num_boost_round=8000,
+                           early_stopping_rounds=10)
+    return model
+
+
+
+for class_id in [1,2,3,4,5,6,7]:
+    x, y, train_day_columns = train_data_day(class_id)
+    
+    print(train_day_columns)
+
+    model=lightGBM_model(x,y)
+    joblib.dump(model, 
+                r'F:\Data\Demand\global_predict\models\model_'+str(class_id)+'.pkl') 
+
+
+
+
+
