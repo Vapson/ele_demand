@@ -52,11 +52,11 @@ def read_data(year):
      
     # lon_axis      
     nsamples = pop.shape[2] + 1
-    bins_x = np.linspace(pop.x.min(),pop.x.max(), nsamples)#.astype(int)    
+    bins_x = np.linspace(pop.x.min(),pop.x.max(), nsamples)
     
     #lat_axis
     nsamples = pop.shape[1] + 1
-    bins_y = np.linspace(pop.y.min(),pop.y.max(), nsamples)#.astype(int)     
+    bins_y = np.linspace(pop.y.min(),pop.y.max(), nsamples) 
     
     nlt_data = nlt_data['band_data'].groupby_bins('x', bins_x).mean().groupby_bins('y', bins_y).mean() 
     nlt_data.values[np.isnan(nlt_data.values)]=0 
@@ -117,7 +117,6 @@ def construct_data_by_region(i):
                 days = 365       
             
 
-            #ENE\REF_TRF\IND\TRO_noRES\TNR_Other\RCO\PRO\NMM\CHE\IRO\NFE\NEU\
             co2_sector = np.full(len(co2_sector_name), 0, dtype = np.float32)
             for s in range(len(co2_sector_name)):
                 co2 = xr.open_dataset('H:\\EDGAR\\'+'v7.0_FT2021_CO2_excl_short-cycle_org_C_' + str(year) + '_' + co2_sector_name[s] + '.0.1x0.1.nc')
@@ -158,7 +157,7 @@ def construct_data_by_region(i):
             nsamples = ref.shape[1] + 1
             bins_x = np.linspace(ref.longitude.min(),ref.longitude.max(), nsamples)#.astype(int)
 
-            #lat_axis
+            # lat_axis
             nsamples = ref.shape[0] + 1
             bins_y = np.linspace(ref.latitude.min(),ref.latitude.max(), nsamples)#.astype(int)  
 
@@ -219,4 +218,4 @@ for i in range(0,len(inputs)):
     print(i,datetime.datetime.now())
 
 import joblib
-joblib.dump(r,'F:\\Data\Demand\\global_predict\\'+str(year)+'_inputs.pkl')
+joblib.dump(r,'F:\\Data\Demand\\global_predict\\inputs\\'+str(year)+'_inputs.pkl')
