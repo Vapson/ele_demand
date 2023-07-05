@@ -87,7 +87,7 @@ for year in range(2000,2020):
     new_data = data.copy()
     
     #
-    # China : adjust by annual electricity consumption
+    # China : adjust by annual electricity demand
     #
     for number in numbers_China:
         o = o_China[o_China['RASTERVALU']==number][year].iloc[0] * 1e+5 # --> MWh
@@ -101,7 +101,7 @@ for year in range(2000,2020):
     print('China: finish')
         
     #
-    # US : adjust by month electricity consumption
+    # US : adjust by month electricity demand
     #         
     time = f['time']
     time = pd.to_datetime(time.values)
