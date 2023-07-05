@@ -1,0 +1,68 @@
+# -*- coding: utf-8 -*-
+
+#
+# Covert .npy files to .nc (Maps)
+#
+
+import xarray as xr
+import rioxarray
+import numpy as np
+import joblib
+import os
+import datetime
+
+def doy2date(year,doy):
+    doy = int(doy)
+    start_time = datetime.datetime(year,1,1)
+    date = start_time + datetime.timedelta(doy)
+    time = datetime.datetime(date.year,date.month,date.day)
+    return time
+
+
+filter_index = np.load(r'F:\Data\Demand\global_predict\filters_index.npy') 
+
+admini = xr.open_dataset(r'F:\Data\Demand\global_predict\boundary\admin_areas.nc')
+admini = admini['admin_units']
+admini.rio.write_crs("EPSG:4326", inplace=True)
+admini.rio.set_spatial_dims(x_dim = 'longitude', y_dim = 'latitude', inplace=True) 
+
+
+for year in range(2000,2020):
+    filename = 'estimates_'+str(year)+'.npy'
+    for x in range(3):
+        results = np.load( os.path.join(r'F:\Data\Demand\global_predict\estimates',str(year),filename) )
+        if x==0:
+            name = 'demand'
+            results = np.nanmean(results,axis=0)        
+        if x==1:
+            name = 'demand_lower_boundary'
+            results = np.nanmin(results,axis=0)
+        if x==2:
+            name = 'demand_upper_boundary'
+            results = np.nanmax(results,axis=0)        
+        
+        r = joblib.load('F:\\Data\\Demand\\global_predict\\inputs\\'+str(year)+'_inputs.pkl')
+        gdp_perCapita = [r[i][0] for i in range(len(r))]
+        filters = np.where(np.array(gdp_perCapita) != -1)[0]
+        r = [r[i] for i in range(len(r)) if i in filters]
+    
+    
+        maps = np.full((results.shape[0],admini.shape[0],admini.shape[1]),np.nan,dtype=np.float32)
+        for i in range(len(filter_index)):
+            data = results[:,i] * r[i][1] /1000
+            zone_shape = len(admini.values[admini.values==filter_index[i]])
+            maps[:,admini.values==filter_index[i]] = np.repeat(data,zone_shape).reshape(results.shape[0],zone_shape)
+            del data
+
+        times = [doy2date(year,d) for d in range(results.shape[0])]
+        
+        maps = xr.DataArray(maps, dims = ['time','y','x'], name = name,
+                            coords = {'y': admini.latitude.values,'x': admini.longitude.values,
+                                                               'time':times})
+        maps.attrs['units'] = 'MWh'
+        
+        maps.to_netcdf(r'F:\Data\Demand\global_predict\estimates\Maps\global_' + name + '_' + str(year)+'.nc', 
+                       encoding={name: {'zlib': True, 'complevel': 9}}) 
+        del maps
+    print(year)
+
